@@ -1,0 +1,109 @@
+#' @title Function to compute the CVPL
+#'
+#' @description
+#' The function computes the cross-validated partial likelihood (CVPL) for the
+#'   Cox model.
+#'
+#' @usage
+#' cvpl(x, surv.time, surv.event, strata, nfold = 1, setseed, na.rm = FALSE,
+#'   verbose = FALSE)
+#'
+#' @param x data matrix
+#' @param surv.time vector of times to event occurrence
+#' @param surv.event vector of indicators for event occurrence
+#' @param strata stratification variable
+#' @param nfold number of folds for the cross-validation
+#' @param setseed seed for the random generator
+#' @param na.rm `TRUE` if the missing values should be removed from the data,
+#'   `FALSE` otherwise
+#' @param verbose verbosity of the function
+#'
+#' @return
+#' A list with items:
+#' - cvpl: mean cross-validated partial likelihood (lower is better)
+#' - pl: vector of cross-validated partial likelihoods
+#' - convergence: vector of booleans reporting the convergence of the Cox model
+#' in each fold
+#' - n: number of observations used to estimate the cross-validated partial
+#' likelihood
+#'
+#' @references
+#' Verweij PJM. and van Houwelingen H (1993) "Cross-validation in survival
+#'   analysis", Statistics in Medicine, 12, pages 2305–2314
+#'
+#' van Houwelingen H, Bruinsma T, Hart AA, van't Veer LJ, and Wessels LFA (2006)
+#'   "Cross-validated Cox regression on microarray gene expression data",
+#'   Statistics in Medicine, 25, pages 3201–3216.
+#'
+#' @seealso
+#' [survcomp::logpl], [survival::coxph]
+#'
+#' @examples
+#' set.seed(12345)
+#' age <- rnorm(100, 50, 10)
+#' stime <- rexp(100)
+#' cens   <- runif(100,.5,2)
+#' sevent  <- as.numeric(stime <= cens)
+#' stime <- pmin(stime, cens)
+#' strat <- sample(1:3, 100, replace=TRUE)
+#' cvpl(x=age, surv.time=stime, surv.event=sevent, strata=strat,
+#'   nfold=10, setseed=54321)
+#'
+#' @export
+cvpl <-
+function(x, surv.time, surv.event, strata, nfold=1, setseed, na.rm=FALSE, verbose=FALSE) {
+	x <- as.data.frame(x)
+	if(is.null(dimnames(x))) { dimnames(x) <- list(names(surv.time), "x") }
+	if(missing(strata)) { strata <- rep(1, length(surv.time)) }
+	## remove NA values
+	cc.ix <- complete.cases(x, surv.time, surv.event, strata)
+	surv.time <- surv.time[cc.ix]
+	surv.event <- surv.event[cc.ix]
+	x <- x[cc.ix, ,drop=FALSE]
+	strata <- strata[cc.ix]
+	nr <- sum(cc.ix)
+	if (!all(cc.ix) && !na.rm) { stop("NA values are present!") }
+	if(verbose) { message(sprintf("%i cases (%i cases are removed due to NA values)", nr, sum(!cc.ix))) }
+
+	## k-fold cross-validation
+	if(nfold == 1) {
+		k <- 1
+		nfold <- nr
+	} else { k <- floor(nr / nfold) }
+
+	## set the random seed to use the same data partition
+	## for the cross-validation
+	if (!missing(setseed)) {
+		set.seed(setseed)
+	}
+	smpl <- sample(nr)
+	res.cvpl <- 0
+	conv <- pl <- NULL
+	dd <- data.frame("stime"=surv.time, "sevent"=surv.event, "strat"=strata, x)
+	for (i in 1:nfold) {
+		#index of samples to hold out
+		if(i == nfold) { s.ix <- smpl[c(((i - 1) * k + 1):nr)] } else { s.ix <- smpl[c(((i - 1) * k + 1):(i * k))] }
+		## convergence ?
+		#lwa <- options("warn")$warn
+		#options("warn"=2)
+		ff <- sprintf("Surv(stime, sevent) ~ strata(strat) + %s", paste(dimnames(dd)[[2]][4:ncol(dd)], collapse=" + "))
+		try(m <- coxph(formula=formula(ff), data=dd[-s.ix, , drop=FALSE]))
+		#options("warn"=lwa)
+		if (class(m) != "try-error") {
+			conv <- c(conv, TRUE)
+			li <- m$loglik[2]
+			mypred <- predict(object=m, newdata=dd)
+			l <- logpl(surv.time=dd[ , "stime"], surv.event=dd[ , "sevent"], pred=mypred, strata=dd[ , "strat"])[1]
+		} else {
+			conv <- c(conv, FALSE)
+			l <- NA
+			li <- NA
+		}
+
+		res.cvpl <- res.cvpl + (li - l)
+		pl <- c(pl, (li - l) / length(s.ix)) # dividing by the number of events instead?
+	}
+	res.cvpl <- res.cvpl / nr # dividing by the number of events instead?
+	names(conv) <- names(pl) <- paste(rep("split", nfold), 1:nfold, sep=".")
+	return (list("cvpl"=res.cvpl, "pl"=pl, "convergence"=conv, "n"=nr))
+}
